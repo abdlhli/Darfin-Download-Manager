@@ -13,7 +13,9 @@ const defaultSettings: Settings = {
   speedLimitBytesPerSec: 0,
   autoStartDownload: true,
   smartCategorization: false,
-  autoExtract: false
+  autoExtract: false,
+  bandwidthMode: 'flat',
+  prioritySecondaryLimit: 10485760
 };
 
 const App: React.FC = () => {
@@ -57,6 +59,7 @@ const App: React.FC = () => {
     }));
 
     unsubs.push(window.runtime.EventsOn('download:updated', (item: DownloadItem) => {
+      if (!item) return;
       setDownloads(prev => prev.map(d => d.id === item.id ? item : d));
     }));
 
@@ -87,7 +90,7 @@ const App: React.FC = () => {
   // Handlers
   const handleAddDownload = async (url: string, savePath: string, threadCount: number) => {
     if (!window.go) return;
-    await window.go.main.App.AddDownload(url, savePath, threadCount);
+    await window.go.main.App.AddDownload(url, savePath, threadCount, "", "");
   };
 
   const handlePause = async (id: string) => {

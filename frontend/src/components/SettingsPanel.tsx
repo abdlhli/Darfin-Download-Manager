@@ -201,6 +201,49 @@ const SettingsPanel: React.FC<Props> = ({ isOpen, onClose, settings, onSave }) =
               </div>
             )}
           </div>
+
+          {/* Bandwidth Priority */}
+          <div className="settings__section">
+            <div className="settings__section-title">Bandwidth Allocation (QoS)</div>
+
+            <div className="settings__row">
+              <span className="settings__label">Allocation Mode</span>
+              <div className="settings__value">
+                <select
+                  className="form-input"
+                  style={{ padding: '6px' }}
+                  value={local.bandwidthMode || 'flat'}
+                  onChange={(e) => setLocal(prev => ({
+                    ...prev,
+                    bandwidthMode: e.target.value,
+                  }))}
+                >
+                  <option value="flat">Flat (Equal Sharing)</option>
+                  <option value="priority">Priority Active</option>
+                </select>
+              </div>
+            </div>
+
+            {local.bandwidthMode === 'priority' && (
+              <div className="settings__row">
+                <span className="settings__label">Secondary Downloads Limit (MB/s)</span>
+                <div className="settings__value">
+                  <input
+                    className="form-input settings-number"
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={Math.round((local.prioritySecondaryLimit || 10485760) / (1024 * 1024))}
+                    onChange={(e) => setLocal(prev => ({
+                      ...prev,
+                      prioritySecondaryLimit: (parseInt(e.target.value) || 10) * 1024 * 1024,
+                    }))}
+                    style={{ width: '120px' }}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="modal__footer">

@@ -1,6 +1,7 @@
 package models
 
 import (
+	"io"
 	"sync"
 	"time"
 )
@@ -37,6 +38,8 @@ type DownloadItem struct {
 	SavePath       string         `json:"savePath"`
 	TotalSize      int64          `json:"totalSize"`
 	DownloadedSize int64          `json:"downloadedSize"`
+	Cookies        string         `json:"cookies"`
+	Referrer       string         `json:"referrer"`
 	Status         DownloadStatus `json:"status"`
 	Segments       []Segment      `json:"segments"`
 	ThreadCount    int            `json:"threadCount"`
@@ -49,9 +52,15 @@ type DownloadItem struct {
 	CompletedAt    *time.Time     `json:"completedAt,omitempty"`
 
 	// Runtime fields (not persisted)
-	mu         sync.Mutex     `json:"-"`
-	cancelFunc func()         `json:"-"`
-	speedTracker *SpeedTracker `json:"-"`
+	mu           sync.Mutex     `json:"-"`
+	cancelFunc   func()         `json:"-"`
+	speedTracker *SpeedTracker  `json:"-"`
+	SpeedLimiter ReaderLimiter  `json:"-"`
+}
+
+type ReaderLimiter interface {
+	Reader(io.Reader) io.Reader
+	SetLimit(int64)
 }
 
 // Lock locks the download item mutex
@@ -129,6 +138,8 @@ type Settings struct {
 	AutoStartDownload      bool   `json:"autoStartDownload"`
 	SmartCategorization    bool   `json:"smartCategorization"`
 	AutoExtract            bool   `json:"autoExtract"`
+	BandwidthMode          string `json:"bandwidthMode"`
+	PrioritySecondaryLimit int64  `json:"prioritySecondaryLimit"`
 }
 
 // DefaultSettings returns default application settings
@@ -142,6 +153,8 @@ func DefaultSettings() Settings {
 		AutoStartDownload:      true,
 		SmartCategorization:    false,
 		AutoExtract:            false,
+		BandwidthMode:          "flat",
+		PrioritySecondaryLimit: 10 * 1024 * 1024,
 	}
 }
 

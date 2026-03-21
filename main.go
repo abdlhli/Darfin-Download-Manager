@@ -16,11 +16,11 @@ func main() {
 	app := NewApp()
 
 	err := wails.Run(&options.App{
-		Title:     "DARFIN - Download Manager",
-		Width:     1024,
-		Height:    700,
-		MinWidth:  800,
-		MinHeight: 600,
+		Title:             "DARFIN (Dynamic Accelerator of Resource & File Integration Network) - Download Manager",
+		Width:             1024,
+		Height:            700,
+		MinWidth:          800,
+		MinHeight:         600,
 		HideWindowOnClose: true,
 		AssetServer: &assetserver.Options{
 			Assets: assets,

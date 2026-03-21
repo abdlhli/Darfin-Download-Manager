@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,16 +21,29 @@ type ProgressCallback func(progress models.DownloadProgress)
 const defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 DARFIN/1.0"
 
 // setHeaders sets common headers for download requests
-func setHeaders(req *http.Request) {
+func setHeaders(req *http.Request, cookies string, referrer string) {
 	req.Header.Set("User-Agent", defaultUserAgent)
 	req.Header.Set("Accept", "*/*")
+	if cookies != "" {
+		req.Header.Set("Cookie", cookies)
+	}
+	if referrer != "" {
+		req.Header.Set("Referer", referrer)
+	}
+}
+
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, 32*1024)
+		return &buf
+	},
 }
 
 // Engine handles multi-threaded segmented downloads
 type Engine struct {
 	client          *http.Client
 	defaultThreads  int
-	tempDir         string
+	tempDir         string // Kept for interface compatibility
 	progressCb      ProgressCallback
 	speedLimiter    *SpeedLimiter
 }
@@ -40,15 +54,15 @@ func NewEngine(tempDir string, defaultThreads int, cb ProgressCallback) *Engine 
 		client: &http.Client{
 			Timeout: 0, // no timeout for downloads
 			Transport: &http.Transport{
-				MaxIdleConns:        100,
-				MaxIdleConnsPerHost: 10,
+				MaxIdleConns:        1000,
+				MaxIdleConnsPerHost: 100,
 				IdleConnTimeout:     90 * time.Second,
 			},
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				if len(via) >= 10 {
 					return fmt.Errorf("stopped after 10 redirects")
 				}
-				setHeaders(req)
+				setHeaders(req, "", "")
 				return nil
 			},
 		},
@@ -64,18 +78,18 @@ func (e *Engine) SetSpeedLimiter(limiter *SpeedLimiter) {
 }
 
 // ProbeURL sends a HEAD request to determine file info and resume support
-func (e *Engine) ProbeURL(url string) (fileName string, totalSize int64, resumable bool, err error) {
+func (e *Engine) ProbeURL(url string, cookies string, referrer string) (fileName string, totalSize int64, resumable bool, err error) {
 	req, err := http.NewRequest("HEAD", url, nil)
 	if err != nil {
 		return "", 0, false, err
 	}
-	setHeaders(req)
+	setHeaders(req, cookies, referrer)
 
 	resp, err := e.client.Do(req)
 	if err != nil || resp.StatusCode >= 400 {
 		// Try GET with range 0-0 as fallback
 		req, _ = http.NewRequest("GET", url, nil)
-		setHeaders(req)
+		setHeaders(req, cookies, referrer)
 		req.Header.Set("Range", "bytes=0-0")
 		resp, err = e.client.Do(req)
 		if err != nil {
@@ -83,6 +97,15 @@ func (e *Engine) ProbeURL(url string) (fileName string, totalSize int64, resumab
 		}
 	}
 	defer resp.Body.Close()
+
+	// Check if server returned a web page instead of a file
+	contentType := resp.Header.Get("Content-Type")
+	isHtmlCtype := strings.Contains(strings.ToLower(contentType), "text/html")
+	isHtmlFile := strings.HasSuffix(strings.ToLower(url), ".html") || strings.HasSuffix(strings.ToLower(url), ".htm")
+
+	if isHtmlCtype && !isHtmlFile {
+		return "", 0, false, fmt.Errorf("server memblokir fitur unduh (mengembalikan halaman peringatan HTML / batas limit kuota / link kedaluwarsa)")
+	}
 
 	// Get file name from Content-Disposition or URL
 	fileName = extractFileName(resp, url)
@@ -110,12 +133,6 @@ func (e *Engine) StartDownload(ctx context.Context, item *models.DownloadItem) e
 		threadCount = e.defaultThreads
 	}
 
-	// Create temp directory for this download
-	downloadTempDir := filepath.Join(e.tempDir, item.ID)
-	if err := os.MkdirAll(downloadTempDir, 0755); err != nil {
-		return fmt.Errorf("failed to create temp dir: %w", err)
-	}
-
 	// Ensure save directory exists
 	saveDir := filepath.Dir(item.SavePath)
 	if err := os.MkdirAll(saveDir, 0755); err != nil {
@@ -127,15 +144,45 @@ func (e *Engine) StartDownload(ctx context.Context, item *models.DownloadItem) e
 		threadCount = 1
 	}
 
+	// Output file path
+	darfinPath := item.SavePath + ".darfin"
+	fileMode := os.O_CREATE | os.O_WRONLY
+	if item.TotalSize > 0 && item.DownloadedSize > 0 {
+		fileMode = os.O_RDWR // Resuming
+	} else if item.TotalSize > 0 {
+		fileMode = os.O_CREATE | os.O_RDWR
+	}
+
+	dstFile, err := os.OpenFile(darfinPath, fileMode, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open destination file: %w", err)
+	}
+	defer dstFile.Close()
+
+	if item.TotalSize > 0 && item.DownloadedSize == 0 {
+		// Pre-allocate space
+		if err := dstFile.Truncate(item.TotalSize); err != nil {
+			return fmt.Errorf("failed to pre-allocate disk space: %w", err)
+		}
+	}
+
+	item.Lock()
 	// Initialize segments if not already set (resume case)
 	if len(item.Segments) == 0 {
-		item.Segments = e.createSegments(item.TotalSize, threadCount, downloadTempDir)
+		item.Segments = e.createSegments(item.TotalSize, threadCount)
+	} else {
+		// Ensure capacity is 200 to prevent pointer shifts during work stealing
+		if cap(item.Segments) < 200 {
+			newSegs := make([]models.Segment, len(item.Segments), 200)
+			copy(newSegs, item.Segments)
+			item.Segments = newSegs
+		}
 	}
+	item.Unlock()
 
 	// Track total downloaded bytes atomically
 	var totalDownloaded int64 = 0
-
-	// Calculate already downloaded bytes (for resume)
+	item.Lock()
 	for _, seg := range item.Segments {
 		if seg.Completed {
 			atomic.AddInt64(&totalDownloaded, seg.EndByte-seg.StartByte+1)
@@ -143,6 +190,7 @@ func (e *Engine) StartDownload(ctx context.Context, item *models.DownloadItem) e
 			atomic.AddInt64(&totalDownloaded, seg.DownloadedBytes)
 		}
 	}
+	item.Unlock()
 
 	// Speed tracker
 	speedTracker := models.NewSpeedTracker()
@@ -186,85 +234,150 @@ func (e *Engine) StartDownload(ctx context.Context, item *models.DownloadItem) e
 		}
 	}()
 
-	// Download segments in parallel
+	// Worker pool
 	var wg sync.WaitGroup
-	errChan := make(chan error, len(item.Segments))
+	errChan := make(chan error, 1) // Only track first critical error
+	
+	// Channel to signal there's work
+	workChan := make(chan int, 200)
+
+	item.Lock()
+	for i := range item.Segments {
+		if !item.Segments[i].Completed {
+			workChan <- i
+		}
+	}
+	item.Unlock()
+
+	// Start workers
+	activeThreads := threadCount
+	if activeThreads > len(workChan) {
+		activeThreads = len(workChan)
+	}
+	if activeThreads == 0 {
+		activeThreads = 1 // Just in case
+	}
+
+	for i := 0; i < activeThreads; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case segIdx := <-workChan:
+					err := e.downloadSegment(ctx, item, segIdx, dstFile, &totalDownloaded)
+					if err != nil && err != context.Canceled {
+						select {
+						case errChan <- fmt.Errorf("segment failed: %w", err):
+						default:
+						}
+						return
+					}
+					
+					// Work Stealing
+					if err == nil && item.Resumable {
+						newSegIdx := e.stealWork(item)
+						if newSegIdx >= 0 {
+							workChan <- newSegIdx
+						}
+					}
+				default:
+					return // No more work in channel
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(progressDone)
+
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	select {
+	case err := <-errChan:
+		return err
+	default:
+	}
+
+	// Rename .darfin to final filename
+	dstFile.Close() // Must close before renaming on Windows
+	if err := os.Rename(darfinPath, item.SavePath); err != nil {
+		return fmt.Errorf("failed to finalize file: %w", err)
+	}
+
+	return nil
+}
+
+// stealWork dynamically splits the largest active segment to balance load
+func (e *Engine) stealWork(item *models.DownloadItem) int {
+	item.Lock()
+	defer item.Unlock()
+
+	var largestSegIdx int = -1
+	var maxRemaining int64 = 0
 
 	for i := range item.Segments {
 		seg := &item.Segments[i]
 		if seg.Completed {
 			continue
 		}
+		
+		end := atomic.LoadInt64(&seg.EndByte)
+		down := atomic.LoadInt64(&seg.DownloadedBytes)
+		remaining := end - (seg.StartByte + down)
 
-		wg.Add(1)
-		go func(segment *models.Segment) {
-			defer wg.Done()
-			if err := e.downloadSegment(ctx, item.URL, segment, &totalDownloaded); err != nil {
-				if ctx.Err() != nil {
-					return // context cancelled (pause/cancel)
-				}
-				errChan <- fmt.Errorf("segment %d failed: %w", segment.Index, err)
-			}
-		}(seg)
-	}
-
-	wg.Wait()
-	close(progressDone)
-	close(errChan)
-
-	// Check for context cancellation (pause/cancel)
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-
-	// Check for segment errors
-	var firstErr error
-	for err := range errChan {
-		if firstErr == nil {
-			firstErr = err
+		if remaining > maxRemaining {
+			maxRemaining = remaining
+			largestSegIdx = i
 		}
 	}
-	if firstErr != nil {
-		return firstErr
+
+	// Only steal if remaining > 2MB to prevent micro-segment fragmentation
+	if maxRemaining > 2*1024*1024 {
+		largestSeg := &item.Segments[largestSegIdx]
+		
+		end := atomic.LoadInt64(&largestSeg.EndByte)
+		down := atomic.LoadInt64(&largestSeg.DownloadedBytes)
+		currentPos := largestSeg.StartByte + down
+
+		halfRemaining := maxRemaining / 2
+		splitPoint := currentPos + halfRemaining
+
+		newSeg := models.Segment{
+			Index:           len(item.Segments),
+			StartByte:       splitPoint,
+			EndByte:         end,
+			DownloadedBytes: 0,
+			Completed:       false,
+		}
+
+		// Update original segment's EndByte atomically
+		atomic.StoreInt64(&largestSeg.EndByte, splitPoint-1)
+
+		item.Segments = append(item.Segments, newSeg)
+		return newSeg.Index
 	}
 
-	// Merge segments into final file
-	item.Lock()
-	item.Status = models.StatusMerging
-	item.Unlock()
-
-	if e.progressCb != nil {
-		e.progressCb(models.DownloadProgress{
-			ID:     item.ID,
-			Status: models.StatusMerging,
-		})
-	}
-
-	if err := MergeSegments(item.Segments, item.SavePath); err != nil {
-		return fmt.Errorf("failed to merge segments: %w", err)
-	}
-
-	// Cleanup temp directory
-	os.RemoveAll(downloadTempDir)
-
-	return nil
+	return -1
 }
 
 // createSegments divides the file into segments
-func (e *Engine) createSegments(totalSize int64, threadCount int, tempDir string) []models.Segment {
+func (e *Engine) createSegments(totalSize int64, threadCount int) []models.Segment {
+	segments := make([]models.Segment, threadCount, 200)
+
 	if totalSize <= 0 {
-		// Unknown size, single segment
-		return []models.Segment{
-			{
-				Index:        0,
-				StartByte:    0,
-				EndByte:      -1, // unknown
-				TempFilePath: filepath.Join(tempDir, "segment_0.tmp"),
-			},
+		segments[0] = models.Segment{
+			Index:     0,
+			StartByte: 0,
+			EndByte:   -1,
 		}
+		return segments[:1]
 	}
 
-	segments := make([]models.Segment, threadCount)
 	segmentSize := totalSize / int64(threadCount)
 
 	for i := 0; i < threadCount; i++ {
@@ -275,30 +388,40 @@ func (e *Engine) createSegments(totalSize int64, threadCount int, tempDir string
 		}
 
 		segments[i] = models.Segment{
-			Index:        i,
-			StartByte:    start,
-			EndByte:      end,
-			TempFilePath: filepath.Join(tempDir, fmt.Sprintf("segment_%d.tmp", i)),
+			Index:     i,
+			StartByte: start,
+			EndByte:   end,
 		}
 	}
 
 	return segments
 }
 
-// downloadSegment downloads a single segment with Range request
-func (e *Engine) downloadSegment(ctx context.Context, url string, segment *models.Segment, totalDownloaded *int64) error {
-	// Calculate actual start (for resume)
-	actualStart := segment.StartByte + segment.DownloadedBytes
+// downloadSegment downloads a single segment with Range request directly to disk
+func (e *Engine) downloadSegment(ctx context.Context, item *models.DownloadItem, segIdx int, dstFile *os.File, totalDownloaded *int64) error {
+	item.Lock()
+	segment := &item.Segments[segIdx]
+	url := item.URL
+	item.Unlock()
+
+	actualStart := segment.StartByte + atomic.LoadInt64(&segment.DownloadedBytes)
+	endByte := atomic.LoadInt64(&segment.EndByte)
+
+	if endByte > 0 && actualStart > endByte {
+		item.Lock()
+		item.Segments[segIdx].Completed = true
+		item.Unlock()
+		return nil
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return err
 	}
-	setHeaders(req)
+	setHeaders(req, item.Cookies, item.Referrer)
 
-	// Set range header
-	if segment.EndByte > 0 {
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", actualStart, segment.EndByte))
+	if endByte > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", actualStart, endByte))
 	} else if actualStart > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", actualStart))
 	}
@@ -310,25 +433,13 @@ func (e *Engine) downloadSegment(ctx context.Context, url string, segment *model
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return fmt.Errorf("unexpected status HTTP %d", resp.StatusCode)
 	}
 
-	// Open temp file for writing (append if resuming)
-	flags := os.O_CREATE | os.O_WRONLY
-	if segment.DownloadedBytes > 0 {
-		flags |= os.O_APPEND
-	} else {
-		flags |= os.O_TRUNC
-	}
+	bufPtr := bufferPool.Get().(*[]byte)
+	buf := *bufPtr
+	defer bufferPool.Put(bufPtr)
 
-	file, err := os.OpenFile(segment.TempFilePath, flags, 0644)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	// Read and write in chunks
-	buf := make([]byte, 32*1024) // 32KB buffer
 	for {
 		select {
 		case <-ctx.Done():
@@ -336,26 +447,56 @@ func (e *Engine) downloadSegment(ctx context.Context, url string, segment *model
 		default:
 		}
 
+		currentEnd := atomic.LoadInt64(&segment.EndByte)
+		currentOffset := segment.StartByte + atomic.LoadInt64(&segment.DownloadedBytes)
+
+		if currentEnd > 0 && currentOffset > currentEnd {
+			break // Reached the dynamic end byte cleanly
+		}
+
+		toRead := int64(len(buf))
+		if currentEnd > 0 {
+			remain := currentEnd - currentOffset + 1
+			if remain < toRead {
+				toRead = remain
+			}
+		}
+
 		var reader io.Reader = resp.Body
 		if e.speedLimiter != nil {
 			reader = e.speedLimiter.Reader(resp.Body)
 		}
 
-		n, err := reader.Read(buf)
+		item.Lock()
+		dlLimiter := item.SpeedLimiter
+		item.Unlock()
+
+		if dlLimiter != nil {
+			reader = dlLimiter.Reader(reader)
+		}
+
+		n, readErr := reader.Read(buf[:toRead])
 		if n > 0 {
-			if _, writeErr := file.Write(buf[:n]); writeErr != nil {
-				return writeErr
+			if dstFile != nil {
+				if _, writeErr := dstFile.WriteAt(buf[:n], currentOffset); writeErr != nil {
+					return writeErr
+				}
 			}
-			segment.DownloadedBytes += int64(n)
+			atomic.AddInt64(&segment.DownloadedBytes, int64(n))
 			atomic.AddInt64(totalDownloaded, int64(n))
 		}
 
-		if err != nil {
-			if err == io.EOF {
-				segment.Completed = true
-				return nil
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
 			}
-			return err
+			return readErr
 		}
 	}
+
+	item.Lock()
+	item.Segments[segIdx].Completed = true
+	item.Unlock()
+
+	return nil
 }

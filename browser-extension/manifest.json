@@ -5,7 +5,9 @@
   "description": "Send downloads to DARFIN Download Manager",
   "permissions": [
     "downloads",
-    "storage"
+    "storage",
+    "contextMenus",
+    "cookies"
   ],
   "host_permissions": [
     "<all_urls>"

@@ -6,7 +6,7 @@ declare global {
     go: {
       main: {
         App: {
-          AddDownload(url: string, savePath: string, threadCount: number): Promise<DownloadItem>;
+          AddDownload(url: string, savePath: string, threadCount: number, cookies: string, referrer: string): Promise<DownloadItem>;
           PauseDownload(id: string): Promise<void>;
           ResumeDownload(id: string): Promise<void>;
           CancelDownload(id: string): Promise<void>;
@@ -20,7 +20,7 @@ declare global {
           OpenFileDialog(defaultFilename: string): Promise<string>;
           OpenFileFolder(filePath: string): Promise<void>;
           GetDefaultSaveDir(): Promise<string>;
-          HandleBrowserExtension(url: string, filename: string): Promise<DownloadItem>;
+          HandleBrowserExtension(url: string, filename: string, cookies: string, referrer: string): Promise<DownloadItem>;
         };
       };
     };
@@ -38,6 +38,8 @@ export interface DownloadItem {
   savePath: string;
   totalSize: number;
   downloadedSize: number;
+  cookies?: string;
+  referrer?: string;
   status: DownloadStatus;
   segments: Segment[];
   threadCount: number;
@@ -80,4 +82,6 @@ export interface Settings {
   autoStartDownload: boolean;
   smartCategorization: boolean;
   autoExtract: boolean;
+  bandwidthMode: string;
+  prioritySecondaryLimit: number;
 }

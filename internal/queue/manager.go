@@ -21,15 +21,15 @@ type EventEmitter func(eventName string, data interface{})
 
 // Manager handles download queue, scheduling, and state management
 type Manager struct {
-	mu            sync.RWMutex
-	downloads     []*models.DownloadItem
-	engine        *downloader.Engine
-	store         *store.Store
-	settings      models.Settings
-	emitEvent     EventEmitter
-	speedLimiter  *downloader.SpeedLimiter
-	activeCount   int
-	cancelFuncs   map[string]context.CancelFunc
+	mu           sync.RWMutex
+	downloads    []*models.DownloadItem
+	engine       *downloader.Engine
+	store        *store.Store
+	settings     models.Settings
+	emitEvent    EventEmitter
+	speedLimiter *downloader.SpeedLimiter
+	activeCount  int
+	cancelFuncs  map[string]context.CancelFunc
 }
 
 // NewManager creates a new queue manager
@@ -115,9 +115,9 @@ func getCategoryForFile(filename string) string {
 }
 
 // AddDownload creates a new download and adds it to the queue
-func (m *Manager) AddDownload(url string, savePath string, threadCount int) (*models.DownloadItem, error) {
+func (m *Manager) AddDownload(url string, savePath string, threadCount int, cookies string, referrer string) (*models.DownloadItem, error) {
 	// Probe URL
-	fileName, totalSize, resumable, err := m.engine.ProbeURL(url)
+	fileName, totalSize, resumable, err := m.engine.ProbeURL(url, cookies, referrer)
 	if err != nil {
 		return nil, fmt.Errorf("failed to probe URL: %w", err)
 	}
@@ -156,6 +156,8 @@ func (m *Manager) AddDownload(url string, savePath string, threadCount int) (*mo
 		Status:      models.StatusQueued,
 		ThreadCount: threadCount,
 		Resumable:   resumable,
+		Cookies:     cookies,
+		Referrer:    referrer,
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
 	}
@@ -246,10 +248,8 @@ func (m *Manager) CancelDownload(id string) error {
 	}
 
 	item.Lock()
-	// Clean up temp files
-	for _, seg := range item.Segments {
-		os.Remove(seg.TempFilePath)
-	}
+	// Clean up temp file
+	os.Remove(item.SavePath + ".darfin")
 	item.Unlock()
 
 	m.mu.Unlock()
@@ -282,6 +282,7 @@ func (m *Manager) RemoveDownload(id string) error {
 
 	m.downloads = append(m.downloads[:idx], m.downloads[idx+1:]...)
 	m.saveStateUnsafe()
+	m.updateBandwidthPrioritiesUnsafe()
 	m.emitEvent("download:removed", map[string]string{"id": id})
 
 	return nil
@@ -365,8 +366,11 @@ func (m *Manager) tryStartNext() {
 
 	m.mu.Unlock()
 
+	m.updateBandwidthPriorities()
 	m.saveState()
-	m.emitEvent("download:updated", m.getItemCopy(nextItem.ID))
+	if copyItem := m.getItemCopy(nextItem.ID); copyItem != nil {
+		m.emitEvent("download:updated", copyItem)
+	}
 
 	// Start download in goroutine
 	go func(item *models.DownloadItem) {
@@ -388,9 +392,9 @@ func (m *Manager) tryStartNext() {
 
 				// Tell UI we are extracting
 				m.emitEvent("download:updated", m.getItemCopy(item.ID))
-				
+
 				extractErr := extractZip(item.SavePath)
-				
+
 				item.Lock()
 				if extractErr != nil {
 					item.Status = models.StatusError
@@ -416,8 +420,11 @@ func (m *Manager) tryStartNext() {
 		delete(m.cancelFuncs, item.ID)
 		m.mu.Unlock()
 
+		m.updateBandwidthPriorities()
 		m.saveState()
-		m.emitEvent("download:updated", m.getItemCopy(item.ID))
+		if copyItem := m.getItemCopy(item.ID); copyItem != nil {
+			m.emitEvent("download:updated", copyItem)
+		}
 
 		// Try to start next queued item
 		m.tryStartNext()
@@ -443,6 +450,8 @@ func (m *Manager) UpdateSettings(settings models.Settings) error {
 	} else {
 		m.speedLimiter.SetLimit(0)
 	}
+
+	m.updateBandwidthPrioritiesUnsafe()
 
 	return m.store.SaveSettings(settings)
 }
@@ -509,4 +518,55 @@ func (m *Manager) Shutdown() {
 	m.mu.Unlock()
 
 	m.saveState()
+}
+
+func (m *Manager) updateBandwidthPriorities() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.updateBandwidthPrioritiesUnsafe()
+}
+
+func (m *Manager) updateBandwidthPrioritiesUnsafe() {
+	if m.settings.BandwidthMode != "priority" {
+		for _, d := range m.downloads {
+			d.Lock()
+			d.SpeedLimiter = nil
+			d.Unlock()
+		}
+		return
+	}
+
+	var activeItems []*models.DownloadItem
+	for _, d := range m.downloads {
+		d.Lock()
+		if d.Status == models.StatusDownloading {
+			activeItems = append(activeItems, d)
+		}
+		d.Unlock()
+	}
+
+	if len(activeItems) == 0 {
+		return
+	}
+
+	first := activeItems[0]
+	first.Lock()
+	first.SpeedLimiter = nil
+	first.Unlock()
+
+	secondaryLimit := m.settings.PrioritySecondaryLimit
+	if secondaryLimit <= 0 {
+		secondaryLimit = 10 * 1024 * 1024
+	}
+
+	for i := 1; i < len(activeItems); i++ {
+		item := activeItems[i]
+		item.Lock()
+		if item.SpeedLimiter == nil {
+			item.SpeedLimiter = downloader.NewSpeedLimiter(secondaryLimit)
+		} else {
+			item.SpeedLimiter.SetLimit(secondaryLimit)
+		}
+		item.Unlock()
+	}
 }

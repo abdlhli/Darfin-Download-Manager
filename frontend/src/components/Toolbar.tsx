@@ -28,10 +28,10 @@ const Toolbar: React.FC<Props> = ({
 
   return (
     <div className="toolbar">
-      <div className="toolbar__brand">
-        <div className="toolbar__logo">D</div>
-        <span className="toolbar__title">DARFIN</span>
-      </div>
+      {/* <div className="toolbar__brand">
+        <img src="/favicon.png" alt="DARFIN Logo" style={{ width: '28px', height: '28px', marginRight: '8px' }} />
+        <span className="toolbar__title" style={{ color: 'white' }}>DARFIN</span>
+      </div> */}
 
       <div className="toolbar__actions">
         <button className="btn btn--primary" onClick={onAddClick} id="btn-add-download" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>

@@ -60,7 +60,9 @@ func (a *App) startup(ctx context.Context) {
 
 	// Initialize System Tray
 	go systray.Run(func() {
-		systray.SetIcon(iconData)
+		if len(iconData) > 0 {
+			systray.SetIcon(iconData)
+		}
 		systray.SetTitle("DARFIN")
 		systray.SetTooltip("DARFIN Download Manager")
 		
@@ -85,7 +87,7 @@ func (a *App) shutdown(ctx context.Context) {
 }
 
 // AddDownload adds a new download to the queue
-func (a *App) AddDownload(url string, savePath string, threadCount int) (*models.DownloadItem, error) {
+func (a *App) AddDownload(url string, savePath string, threadCount int, cookies string, referrer string) (*models.DownloadItem, error) {
 	if a.manager == nil {
 		return nil, fmt.Errorf("manager not initialized")
 	}
@@ -94,7 +96,7 @@ func (a *App) AddDownload(url string, savePath string, threadCount int) (*models
 	runtime.WindowUnminimise(a.ctx)
 	runtime.WindowShow(a.ctx)
 
-	return a.manager.AddDownload(url, savePath, threadCount)
+	return a.manager.AddDownload(url, savePath, threadCount, cookies, referrer)
 }
 
 // PauseDownload pauses an active download
@@ -212,14 +214,16 @@ func (a *App) GetDefaultSaveDir() string {
 }
 
 // HandleBrowserExtension handles download requests from browser extension
-func (a *App) HandleBrowserExtension(url string, filename string) (*models.DownloadItem, error) {
+func (a *App) HandleBrowserExtension(url string, filename string, cookies string, referrer string) (*models.DownloadItem, error) {
 	savePath := filepath.Join(a.GetDefaultSaveDir(), filename)
-	return a.AddDownload(url, savePath, 0)
+	return a.AddDownload(url, savePath, 0, cookies, referrer)
 }
 
 type ExtensionRequest struct {
 	URL      string `json:"url"`
 	Filename string `json:"filename"`
+	Cookies  string `json:"cookies"`
+	Referrer string `json:"referrer"`
 }
 
 // startExtensionServer starts a local HTTP server for the browser extension to send downloads to
@@ -246,7 +250,7 @@ func (a *App) startExtensionServer() {
 		}
 
 		if req.URL != "" {
-			go a.HandleBrowserExtension(req.URL, filepath.Base(req.Filename))
+			go a.HandleBrowserExtension(req.URL, filepath.Base(req.Filename), req.Cookies, req.Referrer)
 		}
 
 		w.WriteHeader(http.StatusOK)

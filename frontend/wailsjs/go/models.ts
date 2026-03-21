@@ -29,6 +29,8 @@ export namespace models {
 	    savePath: string;
 	    totalSize: number;
 	    downloadedSize: number;
+	    cookies: string;
+	    referrer: string;
 	    status: string;
 	    segments: Segment[];
 	    threadCount: number;
@@ -55,6 +57,8 @@ export namespace models {
 	        this.savePath = source["savePath"];
 	        this.totalSize = source["totalSize"];
 	        this.downloadedSize = source["downloadedSize"];
+	        this.cookies = source["cookies"];
+	        this.referrer = source["referrer"];
 	        this.status = source["status"];
 	        this.segments = this.convertValues(source["segments"], Segment);
 	        this.threadCount = source["threadCount"];
@@ -93,6 +97,10 @@ export namespace models {
 	    speedLimitEnabled: boolean;
 	    speedLimitBytesPerSec: number;
 	    autoStartDownload: boolean;
+	    smartCategorization: boolean;
+	    autoExtract: boolean;
+	    bandwidthMode: string;
+	    prioritySecondaryLimit: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new Settings(source);
@@ -106,6 +114,10 @@ export namespace models {
 	        this.speedLimitEnabled = source["speedLimitEnabled"];
 	        this.speedLimitBytesPerSec = source["speedLimitBytesPerSec"];
 	        this.autoStartDownload = source["autoStartDownload"];
+	        this.smartCategorization = source["smartCategorization"];
+	        this.autoExtract = source["autoExtract"];
+	        this.bandwidthMode = source["bandwidthMode"];
+	        this.prioritySecondaryLimit = source["prioritySecondaryLimit"];
 	    }
 	}
 
