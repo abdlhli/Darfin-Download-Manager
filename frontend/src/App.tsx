@@ -23,6 +23,7 @@ const App: React.FC = () => {
   const [settings, setSettings] = useState<Settings>(defaultSettings);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [totalSpeed, setTotalSpeed] = useState<number>(0);
 
   // Initialize data
   useEffect(() => {
@@ -67,23 +68,20 @@ const App: React.FC = () => {
       setDownloads(prev => prev.filter(d => d.id !== data.id));
     }));
 
+    const speeds: Record<string, number> = {};
+    
     unsubs.push(window.runtime.EventsOn('download:progress', (progress: DownloadProgress) => {
-      setDownloads(prev => prev.map(d => {
-        if (d.id === progress.id) {
-          return {
-            ...d,
-            downloadedSize: progress.downloadedSize,
-            speed: progress.speed,
-            progress: progress.progress,
-            status: progress.status !== 'downloading' ? progress.status : d.status,
-          };
-        }
-        return d;
-      }));
+      speeds[progress.id] = (progress.status === 'downloading' ? progress.speed : 0);
     }));
+
+    const interval = setInterval(() => {
+      const ts = Object.values(speeds).reduce((acc, speed) => acc + speed, 0);
+      setTotalSpeed(prev => ts !== prev ? ts : prev);
+    }, 1000);
 
     return () => {
       unsubs.forEach(unsub => unsub());
+      clearInterval(interval);
     };
   }, []);
 
@@ -140,7 +138,6 @@ const App: React.FC = () => {
 
   // Compute stats
   const activeCount = downloads.filter(d => d.status === 'downloading').length;
-  const totalSpeed = downloads.reduce((acc, d) => d.status === 'downloading' ? acc + d.speed : acc, 0);
 
   return (
     <div className="app">

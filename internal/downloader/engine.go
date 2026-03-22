@@ -34,18 +34,18 @@ func setHeaders(req *http.Request, cookies string, referrer string) {
 
 var bufferPool = sync.Pool{
 	New: func() interface{} {
-		buf := make([]byte, 32*1024)
+		buf := make([]byte, 128*1024)
 		return &buf
 	},
 }
 
 // Engine handles multi-threaded segmented downloads
 type Engine struct {
-	client          *http.Client
-	defaultThreads  int
-	tempDir         string // Kept for interface compatibility
-	progressCb      ProgressCallback
-	speedLimiter    *SpeedLimiter
+	client         *http.Client
+	defaultThreads int
+	tempDir        string // Kept for interface compatibility
+	progressCb     ProgressCallback
+	speedLimiter   *SpeedLimiter
 }
 
 // NewEngine creates a new download engine
@@ -211,6 +211,9 @@ func (e *Engine) StartDownload(ctx context.Context, item *models.DownloadItem) e
 				}
 
 				item.Lock()
+				if item.SpeedLimiter == nil {
+					item.SpeedLimiter = NewSpeedLimiter(0) // Default untethered limiter
+				}
 				item.DownloadedSize = downloaded
 				item.Speed = speed
 				item.Progress = progress
@@ -237,7 +240,7 @@ func (e *Engine) StartDownload(ctx context.Context, item *models.DownloadItem) e
 	// Worker pool
 	var wg sync.WaitGroup
 	errChan := make(chan error, 1) // Only track first critical error
-	
+
 	// Channel to signal there's work
 	workChan := make(chan int, 200)
 
@@ -260,22 +263,49 @@ func (e *Engine) StartDownload(ctx context.Context, item *models.DownloadItem) e
 
 	for i := 0; i < activeThreads; i++ {
 		wg.Add(1)
+		workerID := i
 		go func() {
 			defer wg.Done()
+
+			// STAGGER CONNECTION START TO PREVENT FIREWALLS/WAF FROM DROPPING CONNECTIONS
+			if workerID > 0 {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(time.Duration(workerID) * 250 * time.Millisecond):
+				}
+			}
+
 			for {
 				select {
 				case <-ctx.Done():
 					return
 				case segIdx := <-workChan:
-					err := e.downloadSegment(ctx, item, segIdx, dstFile, &totalDownloaded)
+					var err error
+				retryLoop:
+					for attempt := 1; attempt <= 5; attempt++ {
+						err = e.downloadSegment(ctx, item, segIdx, dstFile, &totalDownloaded)
+						if err == nil || err == context.Canceled {
+							break retryLoop
+						}
+						// If error occurs, wait before retrying (linear backoff: 1s, 2s, 3s...)
+						select {
+						case <-ctx.Done():
+							err = ctx.Err()
+							break retryLoop
+						case <-time.After(time.Duration(attempt) * time.Second):
+							// Retry
+						}
+					}
+
 					if err != nil && err != context.Canceled {
 						select {
-						case errChan <- fmt.Errorf("segment failed: %w", err):
+						case errChan <- fmt.Errorf("segment failed after retries: %w", err):
 						default:
 						}
 						return
 					}
-					
+
 					// Work Stealing
 					if err == nil && item.Resumable {
 						newSegIdx := e.stealWork(item)
@@ -325,7 +355,7 @@ func (e *Engine) stealWork(item *models.DownloadItem) int {
 		if seg.Completed {
 			continue
 		}
-		
+
 		end := atomic.LoadInt64(&seg.EndByte)
 		down := atomic.LoadInt64(&seg.DownloadedBytes)
 		remaining := end - (seg.StartByte + down)
@@ -339,7 +369,7 @@ func (e *Engine) stealWork(item *models.DownloadItem) int {
 	// Only steal if remaining > 2MB to prevent micro-segment fragmentation
 	if maxRemaining > 2*1024*1024 {
 		largestSeg := &item.Segments[largestSegIdx]
-		
+
 		end := atomic.LoadInt64(&largestSeg.EndByte)
 		down := atomic.LoadInt64(&largestSeg.DownloadedBytes)
 		currentPos := largestSeg.StartByte + down
@@ -440,6 +470,23 @@ func (e *Engine) downloadSegment(ctx context.Context, item *models.DownloadItem,
 	buf := *bufPtr
 	defer bufferPool.Put(bufPtr)
 
+	const flushThreshold = 1024 * 1024 // 1MB buffer
+	writeBuf := make([]byte, 0, flushThreshold+128*1024)
+	writeOffset := actualStart
+
+	flush := func() error {
+		if len(writeBuf) > 0 && dstFile != nil {
+			if _, writeErr := dstFile.WriteAt(writeBuf, writeOffset); writeErr != nil {
+				return writeErr
+			}
+			writeOffset += int64(len(writeBuf))
+			atomic.StoreInt64(&segment.DownloadedBytes, writeOffset-segment.StartByte)
+			writeBuf = writeBuf[:0]
+		}
+		return nil
+	}
+	defer flush() // ensure anything left is written
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -448,7 +495,7 @@ func (e *Engine) downloadSegment(ctx context.Context, item *models.DownloadItem,
 		}
 
 		currentEnd := atomic.LoadInt64(&segment.EndByte)
-		currentOffset := segment.StartByte + atomic.LoadInt64(&segment.DownloadedBytes)
+		currentOffset := writeOffset + int64(len(writeBuf))
 
 		if currentEnd > 0 && currentOffset > currentEnd {
 			break // Reached the dynamic end byte cleanly
@@ -477,13 +524,27 @@ func (e *Engine) downloadSegment(ctx context.Context, item *models.DownloadItem,
 
 		n, readErr := reader.Read(buf[:toRead])
 		if n > 0 {
-			if dstFile != nil {
-				if _, writeErr := dstFile.WriteAt(buf[:n], currentOffset); writeErr != nil {
-					return writeErr
+			// STRICT BOUNDARY CHECK: Re-evaluate currentEnd to prevent overlap if work was stolen during Read
+			currentEnd = atomic.LoadInt64(&segment.EndByte)
+			if currentEnd > 0 {
+				maxAllowed := currentEnd - currentOffset + 1
+				if maxAllowed <= 0 {
+					n = 0 // Stolen entirely before we wrote
+				} else if int64(n) > maxAllowed {
+					n = int(maxAllowed) // Truncate overflow
 				}
 			}
-			atomic.AddInt64(&segment.DownloadedBytes, int64(n))
-			atomic.AddInt64(totalDownloaded, int64(n))
+
+			if n > 0 {
+				writeBuf = append(writeBuf, buf[:n]...)
+				atomic.AddInt64(totalDownloaded, int64(n)) // update visual tracker immediately
+
+				if len(writeBuf) >= flushThreshold {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+			}
 		}
 
 		if readErr != nil {
@@ -498,5 +559,5 @@ func (e *Engine) downloadSegment(ctx context.Context, item *models.DownloadItem,
 	item.Segments[segIdx].Completed = true
 	item.Unlock()
 
-	return nil
+	return flush()
 }

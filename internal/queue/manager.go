@@ -140,11 +140,52 @@ func (m *Manager) AddDownload(url string, savePath string, threadCount int, cook
 	// Ensure filename from probe is used if savePath is a directory
 	info, err := os.Stat(savePath)
 	if err == nil && info.IsDir() {
-		savePath = filepath.Join(savePath, fileName)
+		// Protect against directory traversal
+		safeFileName := filepath.Base(filepath.Clean(fileName))
+		if safeFileName == "." || safeFileName == "/" || safeFileName == "\\" || safeFileName == "" {
+			safeFileName = "download_" + uuid.New().String()[:8]
+		}
+		savePath = filepath.Join(savePath, safeFileName)
+	}
+
+	// Auto-rename if file already exists or is in queue
+	originalSavePath := savePath
+	ext := filepath.Ext(originalSavePath)
+	nameWithoutExt := strings.TrimSuffix(originalSavePath, ext)
+	counter := 1
+
+	for {
+		_, errStat := os.Stat(savePath)
+		isOnDisk := errStat == nil
+
+		isInQueue := false
+		m.mu.RLock()
+		for _, d := range m.downloads {
+			d.Lock()
+			inUse := d.SavePath == savePath
+			d.Unlock()
+			if inUse {
+				isInQueue = true
+				break
+			}
+		}
+		m.mu.RUnlock()
+
+		if !isOnDisk && !isInQueue {
+			break
+		}
+
+		savePath = fmt.Sprintf("%s (%d)%s", nameWithoutExt, counter, ext)
+		counter++
 	}
 
 	if threadCount <= 0 {
 		threadCount = m.settings.DefaultThreadCount
+	}
+
+	initialStatus := models.StatusQueued
+	if !m.settings.AutoStartDownload {
+		initialStatus = models.StatusPaused
 	}
 
 	item := &models.DownloadItem{
@@ -153,7 +194,7 @@ func (m *Manager) AddDownload(url string, savePath string, threadCount int, cook
 		FileName:    filepath.Base(savePath),
 		SavePath:    savePath,
 		TotalSize:   totalSize,
-		Status:      models.StatusQueued,
+		Status:      initialStatus,
 		ThreadCount: threadCount,
 		Resumable:   resumable,
 		Cookies:     cookies,
@@ -530,7 +571,9 @@ func (m *Manager) updateBandwidthPrioritiesUnsafe() {
 	if m.settings.BandwidthMode != "priority" {
 		for _, d := range m.downloads {
 			d.Lock()
-			d.SpeedLimiter = nil
+			if d.SpeedLimiter != nil {
+				d.SpeedLimiter.SetLimit(0)
+			}
 			d.Unlock()
 		}
 		return
@@ -551,7 +594,9 @@ func (m *Manager) updateBandwidthPrioritiesUnsafe() {
 
 	first := activeItems[0]
 	first.Lock()
-	first.SpeedLimiter = nil
+	if first.SpeedLimiter != nil {
+		first.SpeedLimiter.SetLimit(0)
+	}
 	first.Unlock()
 
 	secondaryLimit := m.settings.PrioritySecondaryLimit

@@ -2,11 +2,11 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
-	_ "embed"
 	"os/exec"
 	"path/filepath"
 
@@ -65,7 +65,7 @@ func (a *App) startup(ctx context.Context) {
 		}
 		systray.SetTitle("DARFIN")
 		systray.SetTooltip("DARFIN Download Manager")
-		
+
 		mShow := systray.AddMenuItem("Show DARFIN", "Show Download Manager")
 		mQuit := systray.AddMenuItem("Quit", "Quit Application")
 
@@ -75,6 +75,19 @@ func (a *App) startup(ctx context.Context) {
 		mQuit.Click(func() {
 			systray.Quit()
 			runtime.Quit(ctx)
+		})
+
+		// Explicitly open window on Left Click & Double Click
+		systray.SetOnClick(func(menu systray.IMenu) {
+			runtime.WindowShow(ctx)
+		})
+		systray.SetOnDClick(func(menu systray.IMenu) {
+			runtime.WindowShow(ctx)
+		})
+
+		// Explicitly show menu on Right Click (fixes bugs on some Windows versions)
+		systray.SetOnRClick(func(menu systray.IMenu) {
+			menu.ShowMenu()
 		})
 	}, func() {})
 }
@@ -228,7 +241,8 @@ type ExtensionRequest struct {
 
 // startExtensionServer starts a local HTTP server for the browser extension to send downloads to
 func (a *App) startExtensionServer() {
-	http.HandleFunc("/add", func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/add", func(w http.ResponseWriter, r *http.Request) {
 		// Allow CORS
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
@@ -257,7 +271,18 @@ func (a *App) startExtensionServer() {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 
-	if err := http.ListenAndServe("127.0.0.1:3547", nil); err != nil {
+	server := &http.Server{
+		Addr:    "127.0.0.1:3547",
+		Handler: mux,
+	}
+
+	// Graceful shutdown
+	go func() {
+		<-a.ctx.Done()
+		server.Shutdown(context.Background())
+	}()
+
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fmt.Println("Local extension server error:", err)
 	}
 }

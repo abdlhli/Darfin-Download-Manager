@@ -1,5 +1,5 @@
 import React from 'react';
-import { DownloadItem as DownloadItemType } from '../types';
+import { DownloadItem as DownloadItemType, DownloadProgress } from '../types';
 import { formatBytes, formatSpeed, formatTime, estimateTimeRemaining } from '../utils';
 import { 
   File, FileArchive, FileImage, FileVideo, FileAudio, FileText, 
@@ -28,7 +28,29 @@ const getFileIcon = (fileName: string) => {
   return <File size={24} className="text-gray-400" />;
 };
 
-const DownloadItem: React.FC<Props> = ({ item, onPause, onResume, onCancel, onRemove, onOpenFolder }) => {
+const DownloadItem: React.FC<Props> = ({ item: initialItem, onPause, onResume, onCancel, onRemove, onOpenFolder }) => {
+  const [item, setItem] = React.useState<DownloadItemType>(initialItem);
+
+  React.useEffect(() => {
+    setItem(initialItem);
+  }, [initialItem]);
+
+  React.useEffect(() => {
+    if (!window.runtime || !window.runtime.EventsOn) return;
+    const unsub = window.runtime.EventsOn('download:progress', (progress: DownloadProgress) => {
+      if (progress.id === item.id) {
+        setItem(prev => ({
+          ...prev,
+          downloadedSize: progress.downloadedSize,
+          speed: progress.speed,
+          progress: progress.progress,
+          status: progress.status !== 'downloading' ? progress.status : prev.status,
+        }));
+      }
+    });
+    return () => unsub();
+  }, [item.id]);
+
   const progress = Math.min(item.progress, 100);
   const eta = estimateTimeRemaining(item.totalSize, item.downloadedSize, item.speed);
 

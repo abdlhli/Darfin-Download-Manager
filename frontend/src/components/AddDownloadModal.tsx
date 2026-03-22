@@ -14,6 +14,7 @@ const AddDownloadModal: React.FC<Props> = ({ isOpen, onClose, onSubmit, defaultS
   const [savePath, setSavePath] = useState(defaultSaveDir);
   const [threadCount, setThreadCount] = useState(defaultThreadCount);
   const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState('');
 
   useEffect(() => {
     setSavePath(defaultSaveDir);
@@ -26,6 +27,7 @@ const AddDownloadModal: React.FC<Props> = ({ isOpen, onClose, onSubmit, defaultS
       navigator.clipboard.readText().then((text) => {
         if (text && (text.startsWith('http://') || text.startsWith('https://') || text.startsWith('ftp://'))) {
           setUrl(text);
+          setErrorMsg('');
         }
       }).catch(() => {});
     }
@@ -47,12 +49,15 @@ const AddDownloadModal: React.FC<Props> = ({ isOpen, onClose, onSubmit, defaultS
     if (!url.trim()) return;
 
     setLoading(true);
+    setErrorMsg('');
     try {
       await onSubmit(url.trim(), savePath, threadCount);
       setUrl('');
+      setErrorMsg('');
       onClose();
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to add download:', err);
+      setErrorMsg(err.message || String(err));
     } finally {
       setLoading(false);
     }
@@ -86,11 +91,16 @@ const AddDownloadModal: React.FC<Props> = ({ isOpen, onClose, onSubmit, defaultS
                 type="url"
                 placeholder="https://example.com/file.zip"
                 value={url}
-                onChange={(e) => setUrl(e.target.value)}
+                onChange={(e) => { setUrl(e.target.value); setErrorMsg(''); }}
                 autoFocus
                 required
               />
             </div>
+            {errorMsg && (
+              <div className="form-group" style={{ color: 'var(--status-error)', fontSize: '0.9rem', marginTop: '-0.5rem', marginBottom: '1rem' }}>
+                {errorMsg}
+              </div>
+            )}
 
             <div className="form-group">
               <label className="form-label" htmlFor="save-path">Save Location</label>
