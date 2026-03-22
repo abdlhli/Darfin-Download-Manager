@@ -1,0 +1,33 @@
+# Binaries and build outputs
+build/bin/
+build/obj/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Wails specific temporary files
+wails.json.user
+
+# Frontend (React)
+frontend/dist/
+frontend/node_modules/
+
+# Logs and error reports
+*.log
+build_err2.txt
+
+# Editor and OS specific files
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*~
+
+# Temporary folders
+.tmp/
+.temp/
+temp/
