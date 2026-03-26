@@ -1,21 +1,36 @@
 {
   "manifest_version": 3,
   "name": "DARFIN Browser Integration",
-  "version": "1.0",
+  "version": "1.1",
   "description": "Send downloads to DARFIN Download Manager",
   "permissions": [
     "downloads",
     "storage",
     "contextMenus",
-    "cookies"
+    "cookies",
+    "activeTab",
+    "webRequest"
   ],
   "host_permissions": [
     "<all_urls>"
   ],
+  "icons": {
+    "16": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
+  },
   "background": {
     "service_worker": "background.js"
   },
   "action": {
     "default_popup": "popup.html"
-  }
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ]
 }

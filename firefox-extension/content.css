@@ -1,0 +1,91 @@
+/* DARFIN Media Download Overlay Button */
+
+.darfin-download-overlay {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  width: 36px;
+  height: 36px;
+  background: rgba(108, 92, 231, 0.9);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  z-index: 2147483647 !important;
+  opacity: 0;
+  transform: scale(0.8);
+  transition: opacity 0.2s ease, transform 0.2s ease, background 0.2s ease !important;
+  pointer-events: auto !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3) !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  min-width: unset !important;
+  min-height: unset !important;
+  max-width: unset !important;
+  max-height: unset !important;
+  line-height: 1 !important;
+  font-size: 0 !important;
+  outline: none !important;
+  box-sizing: border-box !important;
+}
+
+.darfin-download-overlay:hover {
+  background: rgba(108, 92, 231, 1) !important;
+  transform: scale(1.1) !important;
+  box-shadow: 0 4px 12px rgba(108, 92, 231, 0.5) !important;
+}
+
+.darfin-download-overlay:active {
+  transform: scale(0.95) !important;
+}
+
+.darfin-download-overlay svg {
+  width: 20px !important;
+  height: 20px !important;
+  fill: none !important;
+  stroke: white !important;
+  stroke-width: 2 !important;
+  stroke-linecap: round !important;
+  stroke-linejoin: round !important;
+  pointer-events: none !important;
+}
+
+.darfin-download-overlay.darfin-visible {
+  opacity: 1 !important;
+  transform: scale(1) !important;
+}
+
+.darfin-download-overlay.darfin-success {
+  background: rgba(0, 184, 148, 0.9) !important;
+}
+
+/* Tooltip */
+.darfin-download-overlay::after {
+  content: "Download with DARFIN";
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  background: rgba(0, 0, 0, 0.85);
+  color: #fff;
+  font-size: 11px !important;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+  padding: 4px 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease !important;
+  line-height: 1.4 !important;
+}
+
+.darfin-download-overlay:hover::after {
+  opacity: 1 !important;
+}
+
+/* Wrapper to keep relative positioning */
+.darfin-media-wrapper {
+  position: relative !important;
+  display: inline-block !important;
+}

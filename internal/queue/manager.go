@@ -24,6 +24,7 @@ type Manager struct {
 	mu           sync.RWMutex
 	downloads    []*models.DownloadItem
 	engine       *downloader.Engine
+	ytdlp        *downloader.YtDlp
 	store        *store.Store
 	settings     models.Settings
 	emitEvent    EventEmitter
@@ -64,6 +65,8 @@ func NewManager(store *store.Store, emitter EventEmitter) (*Manager, error) {
 		}
 	})
 	m.engine.SetSpeedLimiter(m.speedLimiter)
+	
+	m.ytdlp = downloader.NewYtDlp(store.GetConfigDir())
 
 	// Load existing downloads
 	downloads, err := store.LoadDownloads()
@@ -116,8 +119,19 @@ func getCategoryForFile(filename string) string {
 
 // AddDownload creates a new download and adds it to the queue
 func (m *Manager) AddDownload(url string, savePath string, threadCount int, cookies string, referrer string) (*models.DownloadItem, error) {
+	var fileName string
+	var totalSize int64
+	var resumable bool
+	var err error
+
 	// Probe URL
-	fileName, totalSize, resumable, err := m.engine.ProbeURL(url, cookies, referrer)
+	if downloader.IsSupported(url) {
+		fileName, totalSize, err = m.ytdlp.Probe(url)
+		resumable = true
+	} else {
+		fileName, totalSize, resumable, err = m.engine.ProbeURL(url, cookies, referrer)
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to probe URL: %w", err)
 	}
@@ -415,7 +429,16 @@ func (m *Manager) tryStartNext() {
 
 	// Start download in goroutine
 	go func(item *models.DownloadItem) {
-		err := m.engine.StartDownload(ctx, item)
+		var err error
+		if downloader.IsSupported(item.URL) {
+			err = m.ytdlp.StartDownload(ctx, item, func(progress models.DownloadProgress) {
+				if m.emitEvent != nil {
+					m.emitEvent("download:progress", progress)
+				}
+			})
+		} else {
+			err = m.engine.StartDownload(ctx, item)
+		}
 
 		item.Lock()
 		if err != nil {

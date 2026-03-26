@@ -103,3 +103,99 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
     }
   }
 });
+
+// Media Sniffer State
+let capturedMedia = {};
+
+function addMediaToTab(tabId, url, ext, title) {
+  if (tabId < 0) return;
+  if (!capturedMedia[tabId]) capturedMedia[tabId] = [];
+  
+  if (!capturedMedia[tabId].find(m => m.url === url)) {
+    capturedMedia[tabId].push({ url, ext, title, timestamp: Date.now() });
+    
+    if (chrome.action && chrome.action.setBadgeText) {
+      chrome.action.setBadgeText({
+        text: capturedMedia[tabId].length.toString(),
+        tabId: tabId
+      });
+      chrome.action.setBadgeBackgroundColor({ color: "#6c5ce7", tabId: tabId });
+    }
+  }
+}
+
+// Sniff network requests for streams
+chrome.webRequest.onResponseStarted.addListener(
+  (details) => {
+    if (details.type === "media" || details.type === "xmlhttprequest") {
+      let contentType = "";
+      for (let header of details.responseHeaders || []) {
+        if (header.name.toLowerCase() === "content-type") {
+          contentType = header.value.toLowerCase();
+          break;
+        }
+      }
+
+      const url = details.url.toLowerCase();
+      const isM3U8 = url.includes(".m3u8") || contentType.includes("mpegurl");
+      const isMPD = url.includes(".mpd") || contentType.includes("dash+xml");
+      const isVideo = contentType.startsWith("video/") && !url.includes("googlevideo.com/videoplayback");
+      
+      if (isM3U8) addMediaToTab(details.tabId, details.url, "m3u8", "HLS Stream");
+      else if (isMPD) addMediaToTab(details.tabId, details.url, "mpd", "DASH Stream");
+      else if (isVideo) {
+        // Simple heuristic for filename
+        let name = "Video";
+        try { name = new URL(details.url).pathname.split('/').pop() || "Video"; } catch(e){}
+        addMediaToTab(details.tabId, details.url, "mp4", name);
+      }
+    }
+  },
+  { urls: ["<all_urls>"] },
+  ["responseHeaders"]
+);
+
+// Tab cleanup and YouTube detection
+if (chrome.tabs) {
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (changeInfo.status === 'loading') {
+      capturedMedia[tabId] = [];
+      if (chrome.action && chrome.action.setBadgeText) {
+        chrome.action.setBadgeText({ text: "", tabId: tabId });
+      }
+    }
+    // Detect YouTube Watch pages explicitly
+    if (changeInfo.status === 'complete' && tab.url && tab.url.includes("youtube.com/watch")) {
+      addMediaToTab(tabId, tab.url, "youtube", tab.title || "YouTube Video");
+    }
+  });
+
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    delete capturedMedia[tabId];
+  });
+}
+
+// Listen for messages from content script and popup
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.action === "darfin-download-media") {
+    if (!isEnabled) {
+      sendResponse({ status: "disabled" });
+      return;
+    }
+    sendToDarfin(message.url, message.filename || "", message.referrer || "", null, null);
+    sendResponse({ status: "ok" });
+    return false;
+  }
+  
+  if (message.action === "get-captured-media") {
+    chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
+      if (tabs && tabs.length > 0) {
+        const tabId = tabs[0].id;
+        sendResponse({ media: capturedMedia[tabId] || [] });
+      } else {
+        sendResponse({ media: [] });
+      }
+    });
+    return true; // Keep channel open for async response
+  }
+});
